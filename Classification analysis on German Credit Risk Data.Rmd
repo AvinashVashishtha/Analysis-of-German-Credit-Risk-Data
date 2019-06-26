@@ -1,0 +1,713 @@
+---
+title: "Classification analysis on German Credit Risk Data"
+author: "Avinash Vashishtha"
+date: "June 25, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##  {.tabset .tabset-fade}
+
+### 1.Introduction
+
+***1.Objective***
+
+The objective of this exercise is to apply various classification models to categorical response variable and compare their model results
+
+
+***2.German Credit Risk Data Introduction***
+
+The original dataset contains 1000 entries with 20 categorial/symbolic attributes prepared by Prof. Hofmann. In this dataset, each entry represents a person who takes a credit by a bank. Each person is classified as good or bad credit risks according to the set of attributes. The link to the original dataset can be found below.
+
+```{r , include=TRUE, cache = TRUE}
+set.seed(2019)
+
+
+library(ROCR) #Creating ROC curve
+library(PRROC) #Precision-recall curve
+library(glmnet) #Lasso
+
+library(tidyverse)
+library(DT)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(knitr)
+library(mgcv)
+library(nnet)
+library(NeuralNetTools)
+library(e1071)
+library(verification)
+
+#library(leaps)  #best subset
+#library(glmnet) #lasso
+#library(rpart) #Regression Tree
+#library(rpart.plot)
+#library(mgcv) # GAM
+#library(ipred) #Bagging
+#library(randomForest) #Random Forest
+#library(gbm) #Boosting
+#library(neuralnet) #Neural Network
+```
+
+```{r , include=TRUE, cache = TRUE}
+german.data <- read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data")
+
+head(german.data)
+dim(german.data)
+
+colnames(german.data) <- c("chk_acct", "duration", "credit_his", "purpose", 
+                             "amount", "saving_acct", "present_emp", "installment_rate", "sex", "other_debtor", 
+                             "present_resid", "property", "age", "other_install", "housing", "n_credits", 
+                             "job", "n_people", "telephone", "foreign", "response")
+#orginal response coding 1= good, 2 = bad
+#we need 0 = good, 1 = bad
+german.data$response <- german.data$response - 1
+german.data$response <- as.factor(german.data$response)
+
+```
+
+
+***3.Preparation of Dataset***
+
+***3.1 Splitting the data to train and test dataset***
+
+```{r , include=TRUE, cache = TRUE}
+set.seed(12871014)
+trainrows <- sample(nrow(german.data), nrow(german.data) * 0.75)
+germandata.train <- german.data[trainrows, ]
+germandata.test <- german.data[-trainrows,]
+```
+
+### 2.Logistic Regression
+
+
+***2.1.Running Logistic Regression on all variables***
+```{r , include=TRUE, cache = TRUE}
+germandata.train.glm0 <- glm(response~., family = binomial, germandata.train)
+summary(germandata.train.glm0)
+```
+
+***2.2.Model diagnostic***
+
+```{r , include=TRUE, cache = TRUE}
+germandata.train.glm0$deviance
+AIC(germandata.train.glm0)
+BIC(germandata.train.glm0)
+```
+
+***2.3.In-Sample Prediction***
+```{r , include=TRUE, cache = TRUE}
+
+#Response variable split
+summary(germandata.train$response)
+
+#Summary of predicted values
+germandata.train.pred<-predict(germandata.train.glm0,type="response")
+ summary(germandata.train.pred)
+hist(predict(germandata.train.glm0,type="response"))
+predict<-ifelse(predict(germandata.train.glm0,type="response")>0.4,1,0)
+Misclassification_rate<-mean(predict!= germandata.train$response)
+Misclassification_rate
+
+FPR<- sum(germandata.train$response==0 & predict==1)/sum(germandata.train$response==0)
+FNR<- sum(germandata.train$response==1 & predict==0)/sum(germandata.train$response==1)
+
+```
+
+***2.3.1.Finding optimal Threshold FPR=TPR***
+
+***2.3.1.1.FPR=TPR***
+
+```{r , include=TRUE, cache = TRUE}
+step<-seq(0,1,by=0.001)
+y<-0
+diff<-0
+count<-0
+for(i in step)
+{
+
+ predict<-ifelse(predict(germandata.train.glm0,type="response")>i,1,0)
+ FPR<- sum(germandata.train$response==0 & predict==1)/sum(germandata.train$response==0)
+FNR<- sum(germandata.train$response==1 & predict==0)/sum(germandata.train$response==1)
+
+y[count]<-i
+diff[count]<-ifelse(FPR-FNR<0,FNR-FPR,FPR-FNR)
+count=count+1
+ 
+ 
+}
+
+indices<-min(diff)==diff
+Threshold<-y[indices]
+
+predict<-ifelse(predict(germandata.train.glm0,type="response")>Threshold,1,0)
+Misclassification_rate<-mean(predict!= germandata.train$response)
+FPR<- sum(germandata.train$response==0 & predict==1)/sum(germandata.train$response==0)
+FNR<- sum(germandata.train$response==1 & predict==0)/sum(germandata.train$response==1)
+Misclassification_rate
+FPR
+FNR
+
+```
+
+***2.3.1.2.Naive Choice of Cut-off probability***
+```{r , include=TRUE, cache = TRUE}
+summary(germandata.train$response)
+
+pcut1<- mean(as.numeric(as.character(germandata.train$response)))
+pcut1
+
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+# get binary prediction
+class.glm0.train<- (as.numeric(germandata.train.pred)>pcut1)*1
+summary(class.glm0.train)
+# get confusion matrix
+table(as.numeric(germandata.train$response), class.glm0.train, dnn = c("True", "Predicted"))
+```
+
+***2.3.1.3.Grid search using Asymmetric cost function***
+```{r , include=TRUE, cache = TRUE}
+
+# define a cost function with input "obs" being observed response 
+# and "pi" being predicted probability, and "pcut" being the threshold.
+costfunc = function(obs, pred.p, pcut){
+  weight1 = 5   # define the weight for "true=1 but pred=0" (FN)
+  weight0 = 1    # define the weight for "true=0 but pred=1" (FP)
+  c1 = (obs==1)&(pred.p<pcut)    # count for "true=1 but pred=0"   (FN)
+  c0 = (obs==0)&(pred.p>=pcut)   # count for "true=0 but pred=1"   (FP)
+  cost = mean(weight1*c1 + weight0*c0)  # misclassification with weight
+  return(cost) # you have to return to a value when you write R functions
+} # end of the function
+
+# define a sequence from 0.01 to 1 by 0.01
+p.seq = seq(0.01, 1, 0.01) 
+
+# write a loop for all p-cut to see which one provides the smallest cost
+# first, need to define a 0 vector in order to save the value of cost from all pcut
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+  cost[i] = costfunc(obs = germandata.train$response, pred.p = as.numeric(germandata.train.pred), pcut = p.seq[i])  
+} # end of the loop
+
+optimal.pcut = p.seq[which(cost==min(cost))][1]
+pcut<-optimal.pcut
+optimal.pcut.asymmetric<-optimal.pcut
+
+optimal.pcut
+
+
+```
+
+***Plotting the  misclassfication rate vs range of probability cutoffs***
+```{r , include=TRUE, cache = TRUE}
+plot(p.seq, cost)
+```
+
+***Defining cost function***
+```{r}
+# Asymmetric Misclassification Rate, using  5:1 asymmetric cost
+# r - actual response
+# pi - predicted response
+cost <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+# pcut <-  1/6 ## Bayes estimate
+pcut <-  optimal.pcut.asymmetric
+```
+
+***ROC curve***
+```{r , include=TRUE, cache = TRUE}
+
+pred <- prediction(germandata.train.pred, germandata.train$response)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+***Finding area under the curve to understand the prediction power of the model***
+```{r , include=TRUE, cache = TRUE}
+#Get the AUC
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+
+***Precision Recall curve - another way to find out AUC***
+```{r , include=TRUE, cache = TRUE}
+score1= germandata.train.pred[germandata.train$response==1]
+score0= germandata.train.pred[germandata.train$response==0]
+roc= roc.curve(score1, score0, curve = T)
+roc$auc
+```
+
+***Precision recall curve diagnostics***
+```{r , include=TRUE, cache = TRUE}
+pr= pr.curve(score1, score0, curve = T)
+pr
+```
+
+
+***Plotting PR curve***
+```{r , include=TRUE, cache = TRUE}
+plot(pr)
+```
+
+
+***Out of Sample Prediction***
+```{r , include=TRUE, cache = TRUE}
+pred.glm0.test<- predict(germandata.train.glm0, newdata = germandata.test, type="response")
+```
+
+
+### 3.Stepwise 
+```{r , include=TRUE, cache = TRUE}
+credit.glm.back <- step(germandata.train.glm0) # backward selection (if you don't specify anything)
+summary(credit.glm.back)
+```
+
+
+### 4.Lasso
+```{r , include=TRUE, cache = TRUE}
+germandata.train<-germandata.train[,1:21]
+
+dummy<- model.matrix(~ ., data = germandata.train)
+
+credit.data.lasso<- data.frame(dummy[,-1])
+head(credit.data.lasso)
+colnames(credit.data.lasso)
+
+#Data Preparation for Lasso
+index <- trainrows
+#credit.train.X = as.matrix(select(credit.data.lasso, -response1)[index,])
+#credit.test.X = as.matrix(select(credit.data.lasso, -response1)[-index,])
+#credit.train.Y = credit.data.lasso[index, "response1"]
+#credit.test.Y = credit.data.lasso[-index, "response1"]
+#credit.lasso<- glmnet(x=credit.train.X, y=credit.train.Y, family = "binomial")
+#credit.lasso.cv<- cv.glmnet(x=credit.train.X, y=credit.train.Y, family = "binomial", type.measure = "class")
+#plot(credit.lasso.cv)
+```
+***Coefficients of lambda min***
+```{r , include=TRUE, cache = TRUE}
+#coef(credit.lasso, s=credit.lasso.cv$lambda.min)
+```
+***Coefficients of lambda of 1 standard error***
+```{r , include=TRUE, cache = TRUE}
+#coef(credit.lasso, s=credit.lasso.cv$lambda.1se)
+```
+
+
+### 5.Classification Tree
+
+***Building and plotting a Classificaion Tree using all variables***
+***Cost function with 1:5 asymmetric cost***
+```{r , include=TRUE, cache = TRUE}
+
+
+germandata.largetree <- rpart(formula = response~., data = germandata.train,method = "class", parms = list(loss = matrix(c(0, 5, 1, 0), nrow = 2)))
+
+prp(germandata.largetree, extra = 1, nn.font=40,box.palette = "green")
+
+
+```
+
+***Creating crosstabs of true and predicted value***
+```{r , include=TRUE, cache = TRUE}
+pred0<- predict(germandata.largetree, type="class")
+table(germandata.train$response, pred0, dnn = c("True", "Pred"))
+```
+
+***Checking relative error for all tree sizes***
+```{r , include=TRUE, cache = TRUE}
+plotcp(germandata.largetree)
+printcp(germandata.largetree)
+```
+
+***Pruning the tree using optimal cp and then plotting the optimal tree***
+```{r , include=TRUE, cache = TRUE}
+german.prunedtree <- rpart(response~., data = germandata.train, method = "class",
+                     parms = list(loss = matrix(c(0, 5, 1, 0), nrow = 2)),cp=0.015009)
+prp(german.prunedtree, extra = 1, nn.font=500,box.palette = "green")
+
+```
+
+***In-sample Prediction***
+```{r , include=TRUE, cache = TRUE}
+credit.train.pred.tree1<- predict(german.prunedtree, germandata.train, type="class")
+table(germandata.train$response, credit.train.pred.tree1, dnn=c("Truth","Predicted"))
+```
+
+
+***Out-sample Prediction***
+```{r , include=TRUE, cache = TRUE}
+
+#credit.test.pred.tree1<- predict(german.prunedtree, newdata=germandata.test, type="class")
+#table(germandata.test$response, credit.test.pred.tree1, dnn=c("Truth","Predicted"))
+
+#pred.tree.gtrain <- predict(german.prunedtree, type = "prob")[,2]
+#pred.tree.gtest <- predict(german.prunedtree, newdata=germandata.test, type = "prob")[,2]
+
+
+#credit.train.pred.tree1<- predict(german.prunedtree, data=germandata.test, type="class")
+#head(credit.train.pred.tree1[[,2]])
+#table(germandata.test$response, credit.test.pred.tree1, dnn=c("Truth","Predicted"))
+
+
+#pred.tree.gtrain <- predict(german.prunedtree, type = "prob")[,2]
+#pred.tree.gtest <- predict(german.prunedtree, data=germandata.test, type = "prob")[,2]
+
+#pred.train <- as.numeric(pred.tree.gtrain > optimal.pcut)
+#pred.test <- as.numeric(pred.tree.gtest > optimal.pcut)
+
+#confusion_matrix_train <- table(germandata.train$response, pred.train)
+#confusion_matrix_test <- table(germandata.test$response, pred.test)
+
+#misclassification_rate_train <- round((confusion_matrix_train[2]+confusion_matrix_train[3])/sum(confusion_matrix_train), 2)
+#misclassification_rate_test <- round((confusion_matrix_test[2]+confusion_matrix_test[3])/sum(confusion_matrix_test), 2)
+
+#cat("train misclassfication rate:", misclassification_rate_train, "| test misclassfication rate:", misclassification_rate_test)
+```
+
+
+### 6.GAMs
+
+***Building a Generalized Additive Model***
+```{r , include=TRUE, cache = TRUE}
+germandata.gam <- gam(as.factor(response)~chk_acct+s(duration)+credit_his+purpose+s(amount)+saving_acct+present_emp+installment_rate+sex+other_debtor+present_resid+property
+                  +s(age)+other_install+housing+n_credits+telephone+foreign , family=binomial,data=germandata.train)
+
+summary(germandata.gam)
+
+```
+
+***Plotting the non-linear terms in Generalized Additive Model***
+```{r , include=TRUE, cache = TRUE}
+plot(germandata.gam, shade=TRUE)
+```
+
+
+***Moving age to partially linear term***
+```{r , include=TRUE, cache = TRUE}
+# Move age to partially linear term and refit gam() model
+germandata.gam <- gam(as.factor(response)~chk_acct+s(duration)+credit_his+purpose+s(amount)+saving_acct+present_emp+installment_rate+sex+other_debtor+present_resid+property
+                      +(age)+other_install+housing+n_credits+telephone+foreign , family=binomial,data=germandata.train)
+
+summary(germandata.gam)
+```
+
+***Plotting the non-linear terms in Generalized Additive Model***
+```{r , include=TRUE, cache = TRUE}
+plot(germandata.gam, shade=TRUE)
+```
+
+
+***Train and Test Predictions***
+```{r , include=TRUE, cache = TRUE}
+
+pred.glm.gtrain.gam <- predict(germandata.gam, type = "response")
+pred.glm.gtest.gam <- predict(germandata.gam, newdata=germandata.test,type = "response")
+
+pred.train <- as.numeric(pred.glm.gtrain.gam > optimal.pcut)
+pred.test <- as.numeric(pred.glm.gtest.gam > optimal.pcut)
+
+confusion_matrix_train <- table(germandata.train$response, pred.train)
+confusion_matrix_test <- table(germandata.test$response, pred.test)
+
+misclassification_rate_train <- round((confusion_matrix_train[2]+confusion_matrix_train[3])/sum(confusion_matrix_train), 2)
+misclassification_rate_test <- round((confusion_matrix_test[2]+confusion_matrix_test[3])/sum(confusion_matrix_test), 2)
+
+cat("train misclassfication rate:", misclassification_rate_train, "| test misclassfication rate:", misclassification_rate_test)
+```
+
+***Test/Train Confusion Matrix***
+```{r , include=TRUE, cache = TRUE}
+confusion_matrix_train
+confusion_matrix_test
+```
+
+***ROC Curve - Train***
+```{r , include=TRUE, cache = TRUE}
+par(mfrow=c(1,1))
+roc.logit <- roc.plot(x=(germandata.train$response == "1"), pred =pred.glm.gtrain.gam)
+```
+
+***AUC Train***
+```{r , include=TRUE, cache = TRUE}
+roc.logit$roc.vol[2]
+```
+
+***ROC Curve - Test***
+```{r , include=TRUE, cache = TRUE}
+par(mfrow=c(1,1))
+roc.logit.test <- roc.plot(x=(germandata.test$response == "1"), pred =pred.glm.gtest.gam)
+```
+
+***AUC - Test***
+```{r , include=TRUE, cache = TRUE}
+roc.logit.test$roc.vol[2]
+```
+
+***Train and Test Asymmetric Misclassfication Rate or Asymmetric Misclassification Cost***
+```{r , include=TRUE, cache = TRUE}
+class.pred.train.gam <- (pred.glm.gtrain.gam>pcut)*1
+cost.train <- round(cost(r = germandata.train$response, pi = class.pred.train.gam),2)
+
+class.pred.test.gam<- (pred.glm.gtest.gam>pcut)*1
+cost.test <- round(cost(r = germandata.test$response, pi = class.pred.test.gam),2)
+
+cat("total train cost:", cost.train, "| total test cost:", cost.test)
+```
+
+### 7.Neural Network
+***Building a Neural Network Model***
+```{r , include=TRUE, cache = TRUE}
+par(mfrow=c(1,1))
+germandata.nnet <- train(response~., data=germandata.train,method="nnet")
+```
+
+***Summary Neural Net Model***
+```{r , include=TRUE, cache = TRUE}
+print(germandata.nnet)
+```
+
+***Plotting Neural Net Model***
+```{r , include=TRUE, cache = TRUE}
+plot(germandata.nnet)
+```
+
+```{r , include=TRUE, cache = TRUE}
+plotnet(germandata.nnet$finalModel, y_names = "response")
+title("Graphical Representation of our Neural Network")
+```
+
+***Train and Test predictions***
+```{r , include=TRUE, cache = TRUE}
+pred.glm.gtrain.nn <- predict(germandata.nnet, type = "prob")[,2]
+pred.glm.gtest.nn <- predict(germandata.nnet, newdata=germandata.test,type = "prob")[,2]
+
+pred.train <- as.numeric(pred.glm.gtrain.nn > optimal.pcut)
+pred.test <- as.numeric(pred.glm.gtest.nn > optimal.pcut)
+
+confusion_matrix_train <- table(germandata.train$response, pred.train)
+confusion_matrix_test <- table(germandata.test$response, pred.test)
+
+misclassification_rate_train <- round((confusion_matrix_train[2]+confusion_matrix_train[3])/sum(confusion_matrix_train), 2)
+misclassification_rate_test <- round((confusion_matrix_test[2]+confusion_matrix_test[3])/sum(confusion_matrix_test), 2)
+
+cat("train misclassfication rate:", misclassification_rate_train, "| test misclassfication rate:", misclassification_rate_test)
+```
+
+***Train/Test Confusion Matrix***
+```{r , include=TRUE, cache = TRUE}
+
+confusion_matrix_test
+confusion_matrix_train
+```
+
+***ROC/AUC Curve-Train***
+```{r , include=TRUE, cache = TRUE}
+par(mfrow=c(1,1))
+roc.logit <- roc.plot(x=(germandata.train$response == "1"), pred =pred.glm.gtrain.nn)
+roc.logit$roc.vol[2]
+```
+
+***ROC/AUC Curve-Test***
+```{r , include=TRUE, cache = TRUE}
+par(mfrow=c(1,1))
+roc.logit.test <- roc.plot(x=(germandata.test$response == "1"), pred =pred.glm.gtest.nn)
+roc.logit.test$roc.vol[2]
+
+```
+
+***Train and Test Asymmetric Misclassfication Rate or Asymmetric Misclassification Cost***
+```{r , include=TRUE, cache = TRUE}
+class.pred.train.nn <- (pred.glm.gtrain.nn>pcut)*1
+cost.train <- round(cost(r = germandata.train$response, pi = class.pred.train.nn),2)
+
+class.pred.test.nn<- (pred.glm.gtest.nn>pcut)*1
+cost.test <- round(cost(r = germandata.test$response, pi = class.pred.test.nn),2)
+
+cat("total train cost:", cost.train, "| total test cost:", cost.test)
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
+```{r , include=TRUE, cache = TRUE}
+
+```
+
